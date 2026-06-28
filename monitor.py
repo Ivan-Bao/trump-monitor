@@ -82,32 +82,40 @@ ALL_KEYWORDS = TIER1 + TIER2 + TIER3
 
 # ── News sources ──────────────────────────────────────────────────────────────
 # AP Top News and Reuters RSSHub URLs were failing — replaced with direct feeds
+# FEEDS = [
+#     {
+#         "name": "Al Jazeera",
+#         "url": "https://www.aljazeera.com/xml/rss/all.xml",
+#     },
+#     {
+#         "name": "BBC World",
+#         "url": "http://feeds.bbci.co.uk/news/world/rss.xml",
+#     },
+#     {
+#         "name": "Sky News World",
+#         "url": "https://feeds.skynews.com/feeds/rss/world.xml",
+#     },
+#     {
+#         "name": "Fox News World",
+#         "url": "https://moxie.foxnews.com/google-publisher/world.xml",
+#     },
+#     {
+#         "name": "Politico",
+#         "url": "https://www.politico.com/rss/politicopicks.xml",
+#     },
+#     # Truth Social — add your RSSHub URL here once deployed
+#     # {
+#     #     "name": "Truth Social",
+#     #     "url": "https://YOUR-RSSHUB.railway.app/truthsocial/user/realDonaldTrump",
+#     # },
+# ]
+
 FEEDS = [
     {
-        "name": "Al Jazeera",
-        "url": "https://www.aljazeera.com/xml/rss/all.xml",
+        "name": "Trump Truth Social",
+        "url": "https://www.trumpstruth.org/feed",
+        "trump_only": True,
     },
-    {
-        "name": "BBC World",
-        "url": "http://feeds.bbci.co.uk/news/world/rss.xml",
-    },
-    {
-        "name": "Sky News World",
-        "url": "https://feeds.skynews.com/feeds/rss/world.xml",
-    },
-    {
-        "name": "Fox News World",
-        "url": "https://moxie.foxnews.com/google-publisher/world.xml",
-    },
-    {
-        "name": "Politico",
-        "url": "https://www.politico.com/rss/politicopicks.xml",
-    },
-    # Truth Social — add your RSSHub URL here once deployed
-    # {
-    #     "name": "Truth Social",
-    #     "url": "https://YOUR-RSSHUB.railway.app/truthsocial/user/realDonaldTrump",
-    # },
 ]
 
 # ── State ─────────────────────────────────────────────────────────────────────
