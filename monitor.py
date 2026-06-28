@@ -1,7 +1,8 @@
 """
 Trump / Iran / Gold Event Monitor
-Polls Trump's Truth Social posts for keywords relevant to gold/oil/macro trading.
-Sends Telegram notifications when matches found.
+Monitors Trump's Truth Social posts for market-relevant keywords.
+Sends Telegram push notifications on matches.
+Only alerts on NEW posts — persists seen IDs across restarts.
 """
 
 import os
@@ -12,8 +13,8 @@ import logging
 import feedparser
 import requests
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
-# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)s  %(message)s",
@@ -21,12 +22,11 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 POLL_INTERVAL    = int(os.environ.get("POLL_INTERVAL", "180"))
+SEEN_IDS_FILE    = "/tmp/seen_ids.txt"
 
-# ── Keywords ──────────────────────────────────────────────────────────────────
 TIER1 = [
     "iran ceasefire", "iran deal", "iran nuclear deal", "iran sanctions",
     "iran strike", "iran attack", "strike iran", "attack iran",
@@ -49,9 +49,6 @@ TIER3 = [
 
 ALL_KEYWORDS = TIER1 + TIER2 + TIER3
 
-# ── Feeds ─────────────────────────────────────────────────────────────────────
-# Primary: trumpstruth.org — free RSS archive of Trump's Truth Social posts
-# Updates every few minutes, no auth required
 FEEDS = [
     {
         "name": "Trump Truth Social",
@@ -60,16 +57,32 @@ FEEDS = [
     },
 ]
 
-# ── State ─────────────────────────────────────────────────────────────────────
-seen_ids: set[str] = set()
+
+def load_seen_ids():
+    try:
+        with open(SEEN_IDS_FILE, "r") as f:
+            return set(line.strip() for line in f if line.strip())
+    except FileNotFoundError:
+        return set()
 
 
-def get_item_id(entry) -> str:
+def save_seen_ids(seen):
+    try:
+        with open(SEEN_IDS_FILE, "w") as f:
+            f.write("\n".join(seen))
+    except Exception as e:
+        log.error(f"Failed to save seen_ids: {e}")
+
+
+seen_ids = load_seen_ids()
+
+
+def get_item_id(entry):
     raw = getattr(entry, "id", None) or getattr(entry, "link", None) or entry.get("title", "")
     return hashlib.md5(raw.encode()).hexdigest()
 
 
-def classify_keywords(text: str) -> tuple[list[str], int]:
+def classify_keywords(text):
     text_lower = text.lower()
     matched = [k for k in ALL_KEYWORDS if k in text_lower]
     if not matched:
@@ -83,29 +96,28 @@ def classify_keywords(text: str) -> tuple[list[str], int]:
     return matched, tier
 
 
-def strip_html(text: str) -> str:
-    """Remove HTML tags from feed content."""
+def strip_html(text):
     return re.sub(r'<[^>]+>', '', text).strip()
 
 
-def clean_for_telegram(text: str) -> str:
-    """Escape special chars so Telegram plain text mode doesn't choke."""
-    return text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+def clean_text(text):
+    return (text
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'"))
 
 
-def send_telegram(message: str) -> bool:
-    """Send plain text message to Telegram — no HTML parse mode to avoid 400 errors."""
+def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    # Telegram max message length is 4096 chars
-    message = message[:4000]
     try:
         r = requests.post(
             url,
             json={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": message,
+                "text": message[:4000],
                 "disable_web_page_preview": True,
-                # No parse_mode — plain text avoids all HTML entity errors
             },
             timeout=10
         )
@@ -116,11 +128,31 @@ def send_telegram(message: str) -> bool:
         return False
 
 
-def tier_emoji(tier: int) -> str:
+def tier_emoji(tier):
     return {1: "🚨", 2: "⚠️", 3: "📡"}.get(tier, "📡")
 
 
-def check_feed(feed: dict) -> int:
+def backfill_seen_ids():
+    """On fresh start, mark all currently visible posts as seen without alerting.
+    This prevents replaying old posts every time the container restarts."""
+    log.info("Fresh start — backfilling current feed to skip old posts...")
+    count = 0
+    for feed in FEEDS:
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; MarketMonitor/1.0)"}
+            parsed = feedparser.parse(feed["url"], request_headers=headers)
+            for entry in parsed.entries:
+                item_id = get_item_id(entry)
+                if item_id not in seen_ids:
+                    seen_ids.add(item_id)
+                    count += 1
+        except Exception as e:
+            log.error(f"Backfill error [{feed['name']}]: {e}")
+    save_seen_ids(seen_ids)
+    log.info(f"Backfilled {count} existing posts — only NEW posts will alert from now on")
+
+
+def check_feed(feed):
     alerts = 0
     try:
         headers = {"User-Agent": "Mozilla/5.0 (compatible; MarketMonitor/1.0)"}
@@ -134,47 +166,47 @@ def check_feed(feed: dict) -> int:
             item_id = get_item_id(entry)
             if item_id in seen_ids:
                 continue
+
+            # Mark as seen immediately — even if no keyword match
             seen_ids.add(item_id)
 
-            title   = strip_html(getattr(entry, "title",   ""))
-            summary = strip_html(getattr(entry, "summary", ""))
+            title   = clean_text(strip_html(getattr(entry, "title",   "")))
+            summary = clean_text(strip_html(getattr(entry, "summary", "")))
             link    = getattr(entry, "link", "")
-
-            # For Trump posts the summary IS the post content
-            # title is often just the first line, summary has the full text
-            text = f"{title} {summary}"
+            text    = f"{title} {summary}"
 
             matched, tier = classify_keywords(text)
-            if not matched:
-                continue
+            if matched:
+                emoji = tier_emoji(tier)
+                ts = datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M ET")
 
-            emoji = tier_emoji(tier)
-            ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
-            kw_str = ", ".join(matched[:5])  # cap at 5 keywords shown
+                kw_str = ", ".join(matched[:5])
+                post_text = summary[:600] if feed.get("trump_only") else summary[:280]
 
-            if feed.get("trump_only"):
-                # Show full post content — this IS the signal
-                post_text = clean_for_telegram(summary[:600])
-                message = (
-                    f"{emoji} TRUMP POST — Tier {tier}  {ts}\n"
-                    f"Keywords: {kw_str}\n"
-                    f"{'─' * 30}\n"
-                    f"{post_text}\n"
-                    f"{'─' * 30}\n"
-                    f"{link}"
-                )
-            else:
-                message = (
-                    f"{emoji} Tier {tier} — {feed['name']}  {ts}\n"
-                    f"Keywords: {kw_str}\n\n"
-                    f"{title}\n\n"
-                    f"{summary[:280]}\n\n"
-                    f"{link}"
-                )
+                if feed.get("trump_only"):
+                    message = (
+                        f"{emoji} TRUMP POST — Tier {tier}  {ts}\n"
+                        f"Keywords: {kw_str}\n"
+                        f"{'─' * 32}\n"
+                        f"{post_text}\n"
+                        f"{'─' * 32}\n"
+                        f"{link}"
+                    )
+                else:
+                    message = (
+                        f"{emoji} Tier {tier} — {feed['name']}  {ts}\n"
+                        f"Keywords: {kw_str}\n\n"
+                        f"{title}\n\n"
+                        f"{post_text}\n\n"
+                        f"{link}"
+                    )
 
-            log.info(f"MATCH [{feed['name']}] tier={tier} kw={matched} '{title[:60]}'")
-            send_telegram(message)
-            alerts += 1
+                log.info(f"MATCH [{feed['name']}] tier={tier} kw={matched} '{title[:60]}'")
+                send_telegram(message)
+                alerts += 1
+
+        # Save after processing each feed
+        save_seen_ids(seen_ids)
 
     except Exception as e:
         log.error(f"Error [{feed['name']}]: {e}")
@@ -197,6 +229,9 @@ def startup_message():
 
 def main():
     log.info("Market Monitor starting...")
+    # Only backfill on truly fresh start (no persisted file)
+    if not load_seen_ids():
+        backfill_seen_ids()
     startup_message()
     cycle = 0
     while True:
