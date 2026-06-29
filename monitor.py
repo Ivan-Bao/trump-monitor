@@ -32,7 +32,7 @@ TIER1 = [
     "iran strike", "iran attack", "strike iran", "attack iran",
     "ceasefire iran", "us and iran", "strait of hormuz", "hormuz",
     "kharg island", "tehran nuclear", "iran oil", "persian gulf blockade",
-    "trump iran", "us iran", " iran ", "iran ",
+    "trump iran", "us iran", " iran ", "iran ", "china", "xi",
 ]
 
 TIER2 = [
