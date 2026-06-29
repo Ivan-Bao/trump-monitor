@@ -2,7 +2,7 @@
 Trump / Iran / Gold Event Monitor
 Monitors Trump's Truth Social posts for market-relevant keywords.
 Sends Telegram push notifications on matches.
-In-memory deduplication — backfills on startup to skip old posts.
+Only alerts on NEW posts — persists seen IDs across restarts.
 """
 
 import os
@@ -13,6 +13,7 @@ import logging
 import feedparser
 import requests
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +25,7 @@ log = logging.getLogger(__name__)
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 POLL_INTERVAL    = int(os.environ.get("POLL_INTERVAL", "180"))
+SEEN_IDS_FILE    = "/tmp/seen_ids.txt"
 
 TIER1 = [
     "iran ceasefire", "iran deal", "iran nuclear deal", "iran sanctions",
@@ -55,9 +57,24 @@ FEEDS = [
     },
 ]
 
-# In-memory deduplication — resets on container restart
-# Backfill on startup prevents replaying old posts after restart
-seen_ids = set()
+
+def load_seen_ids():
+    try:
+        with open(SEEN_IDS_FILE, "r") as f:
+            return set(line.strip() for line in f if line.strip())
+    except FileNotFoundError:
+        return set()
+
+
+def save_seen_ids(seen):
+    try:
+        with open(SEEN_IDS_FILE, "w") as f:
+            f.write("\n".join(seen))
+    except Exception as e:
+        log.error(f"Failed to save seen_ids: {e}")
+
+
+seen_ids = load_seen_ids()
 
 
 def get_item_id(entry):
@@ -116,9 +133,9 @@ def tier_emoji(tier):
 
 
 def backfill_seen_ids():
-    """On startup, mark all currently visible posts as seen without alerting.
-    Prevents replaying recent posts every time the container restarts."""
-    log.info("Backfilling current feed — skipping existing posts...")
+    """On fresh start, mark all currently visible posts as seen without alerting.
+    This prevents replaying old posts every time the container restarts."""
+    log.info("Fresh start — backfilling current feed to skip old posts...")
     count = 0
     for feed in FEEDS:
         try:
@@ -131,7 +148,8 @@ def backfill_seen_ids():
                     count += 1
         except Exception as e:
             log.error(f"Backfill error [{feed['name']}]: {e}")
-    log.info(f"Backfilled {count} existing posts — only NEW posts will alert")
+    save_seen_ids(seen_ids)
+    log.info(f"Backfilled {count} existing posts — only NEW posts will alert from now on")
 
 
 def check_feed(feed):
@@ -158,34 +176,37 @@ def check_feed(feed):
             text    = f"{title} {summary}"
 
             matched, tier = classify_keywords(text)
-            if not matched:
-                continue
+            if matched:
+                emoji = tier_emoji(tier)
+                ts = datetime.now(ZoneInfo("America/New_York")).strftime("%H:%M ET")
 
-            emoji = tier_emoji(tier)
-            ts = datetime.now(timezone.utc).strftime("%H:%M UTC")
-            kw_str = ", ".join(matched[:5])
+                kw_str = ", ".join(matched[:5])
+                post_text = summary[:600] if feed.get("trump_only") else summary[:280]
 
-            if feed.get("trump_only"):
-                message = (
-                    f"{emoji} TRUMP POST — Tier {tier}  {ts}\n"
-                    f"Keywords: {kw_str}\n"
-                    f"{'─' * 32}\n"
-                    f"{summary[:600]}\n"
-                    f"{'─' * 32}\n"
-                    f"{link}"
-                )
-            else:
-                message = (
-                    f"{emoji} Tier {tier} — {feed['name']}  {ts}\n"
-                    f"Keywords: {kw_str}\n\n"
-                    f"{title}\n\n"
-                    f"{summary[:280]}\n\n"
-                    f"{link}"
-                )
+                if feed.get("trump_only"):
+                    message = (
+                        f"{emoji} TRUMP POST — Tier {tier}  {ts}\n"
+                        f"Keywords: {kw_str}\n"
+                        f"{'─' * 32}\n"
+                        f"{post_text}\n"
+                        f"{'─' * 32}\n"
+                        f"{link}"
+                    )
+                else:
+                    message = (
+                        f"{emoji} Tier {tier} — {feed['name']}  {ts}\n"
+                        f"Keywords: {kw_str}\n\n"
+                        f"{title}\n\n"
+                        f"{post_text}\n\n"
+                        f"{link}"
+                    )
 
-            log.info(f"MATCH [{feed['name']}] tier={tier} kw={matched} '{title[:60]}'")
-            send_telegram(message)
-            alerts += 1
+                log.info(f"MATCH [{feed['name']}] tier={tier} kw={matched} '{title[:60]}'")
+                send_telegram(message)
+                alerts += 1
+
+        # Save after processing each feed
+        save_seen_ids(seen_ids)
 
     except Exception as e:
         log.error(f"Error [{feed['name']}]: {e}")
@@ -208,7 +229,9 @@ def startup_message():
 
 def main():
     log.info("Market Monitor starting...")
-    backfill_seen_ids()
+    # Only backfill on truly fresh start (no persisted file)
+    if not load_seen_ids():
+        backfill_seen_ids()
     startup_message()
     cycle = 0
     while True:
